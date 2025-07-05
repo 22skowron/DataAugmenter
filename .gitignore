@@ -1,0 +1,10 @@
+.idea
+
+venv
+.venv
+
+env
+.env
+
+scratchpad.py
+linear_script.py
