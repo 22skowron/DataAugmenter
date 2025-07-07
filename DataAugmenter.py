@@ -1,11 +1,11 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer, BatchEncoding
 from typing import List, Iterator, Tuple, Literal, Optional, TypedDict
 
-from linear_script import outputs, max_new_tokens
+from linear_script import outputs, max_new_tokens, paraphrases
 from utils.types import (
     InputJSON,
-    Paraphrase,
-    OutputJSON,
+    ParaphrasedJSON,
+    TranslatedJSON,
     AugmentationStrategy,
     AugmentationStrategyLiteral,
     PromptType,
@@ -64,14 +64,42 @@ class DataAugmenter:
             pretrained_model_name_or_path=translation_model
         )
 
-    def load_input(self):
-        ...
+    @staticmethod
+    def load_dataset(
+            dataset_path: str | Path,
+            batch_size: int,
+            start_line_idx: int = 1,
+            encoding: str | None = "utf-8"
+    ) -> Iterator[list[InputJSON]]:
 
-    def batch_load_input(self):
-        ...
+        if not isinstance(batch_size, int) or batch_size <= 0:
+            raise ValueError("batch_size must be a positive int.")
 
-    def save_augmentations(self):
-        ...
+        start_line_idx -= 1
+
+        with open(dataset_path, "r", encoding=encoding) as f:
+            batch = []
+            for line_idx, line in enumerate(f):
+                if line_idx < start_line_idx:
+                    continue
+
+                batch.append(json.loads(line))
+                if len(batch) == batch_size:
+                    yield batch
+                    batch = []
+            if batch:
+                yield batch
+
+    @staticmethod
+    def save_augmentations(
+            output_path: str | Path,
+            augmentations: list[ParaphrasedJSON] | list[TranslatedJSON],
+            mode: str = "w",
+            encoding: str | None = "utf-8"
+    ):
+        with open(output_path, mode, encoding=encoding) as f:
+            for obj in augmentations:
+                f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
     def get_prompt(
             self,
@@ -121,16 +149,16 @@ class DataAugmenter:
             add_generation_prompt=True
         )
 
-    def tokenize_paraphrases(
+    def encode_paraphrases(
             self,
             prompts: list[str],
             padding: str | bool = 'longest',
-            truncation: str | bool = False,
+            truncation: str | bool = True,
             **kwargs
     ) -> transformers.BatchEncoding:
         if not self.paraphrasing_tokenizer:
             raise ValueError(
-                "Tokenizer of a paraphrasing LLM is not set. Please initialize it before calling tokenize_paraphrases.")
+                "Tokenizer of a paraphrasing LLM is not set. Please initialize it before calling encode_paraphrases.")
 
         return self.paraphrasing_tokenizer(
             prompts,
@@ -141,11 +169,28 @@ class DataAugmenter:
             **kwargs
         ).to(self.device)
 
-    def tokenize_translations(self) -> transformers.BatchEncoding:
+    def encode_translations(self) -> transformers.BatchEncoding:
         ...
 
-    def get_sensible_max_new_tokens(
+    def count_prompt_template_tokens(
             self,
+            prompt_type: PromptTypeLiteral = "basic",
+            paraphrase_examples: Optional[list[str]] = None,
+            custom_prompt: Optional[list[dict[str, str]]] = None
+    ) -> int:
+        empty_prompt_template = self.get_prompt_str(
+            og_text="",
+            prompt_type=prompt_type,
+            paraphrase_examples=paraphrase_examples,
+            custom_prompt=custom_prompt
+        )
+
+        return self.encode_paraphrases(
+            [empty_prompt_template]
+        )["input_ids"].shape[1]
+
+    @staticmethod
+    def estimate_max_new_tokens(
             num_text_tokens: int,
             augmentation_strategy: AugmentationStrategyLiteral,
             num_prompt_template_tokens: Optional[int] = None,
@@ -153,18 +198,22 @@ class DataAugmenter:
     ) -> int:
         augmentation_strategy = AugmentationStrategy(augmentation_strategy)
 
-        max_new_tokens: int
+        max_new_tokens: int = 0
         if augmentation_strategy == AugmentationStrategy.PARAPHRASING:
-            if not self.paraphrasing_tokenizer:
-                raise ValueError(
-                    "Tokenizer of a paraphrasing LLM is not set. Please initialize it before calling tokenize_paraphrases.")
             if not isinstance(num_prompt_template_tokens, int):
                 raise ValueError(
                     f"Invalid value for `num_prompt_template_tokens`. "
                     f"When augmentation_strategy is set to {AugmentationStrategy.PARAPHRASING.value} `num_prompt_template_tokens` is mandatory with type int."
                 )
 
-            ...
+            num_og_text_tokens = num_text_tokens - num_prompt_template_tokens  # ~Number of InputJSON["text"] tokens of the longest text in a batch
+            max_new_tokens = int(
+                num_og_text_tokens * len_factor)  # ⚠ model.generate does NOT support per-example max length in batch mode, so here we must take the MAX of the batch for safety (conservative estimate)
+
+        elif augmentation_strategy == AugmentationStrategy.TRANSLATION:
+            max_new_tokens = int(num_text_tokens * len_factor)
+
+        return max_new_tokens
 
     def generate_paraphrases(
             self,
@@ -172,13 +221,16 @@ class DataAugmenter:
             num_paraphrases: int,
             num_input_tokens: int,
             max_new_tokens: int,
-            temperature: int = 0.7,
-            model: Optional[str] = None,
+            temperature: float = 0.7,
             **kwargs
     ) -> list[str]:
         if self.paraphrasing_model is None or self.paraphrasing_tokenizer is None:
-            raise ValueError(
-                "Paraphrasing LLM is not set. Please initialize it before calling generate_paraphrases.")
+            raise ValueError("Paraphrasing LLM is not set. Please initialize it before calling generate_paraphrases.")
+
+        if (num_input_tokens + max_new_tokens >= self.paraphrasing_tokenizer.model_max_length):
+            logger.warning(
+                f"⚠️ num_input_tokens + max_new_tokens ({num_input_tokens + max_new_tokens}) >= context window ({self.paraphrasing_tokenizer.model_max_length})"
+            )
 
         # Generate token ids
         outputs = self.paraphrasing_model.generate(
@@ -203,13 +255,71 @@ class DataAugmenter:
             input_path: Path | str,
             output_path: Path | str,
             augmentation_strategy: AugmentationStrategyLiteral,
+            num_augmentations: int,
             batch_size: int,
+            temperature: float = 0.7,
             model: Optional[Path | str] = None,
-            batch_load_input: bool = False,
             start_line_idx: int = 1,
             **kwargs
             ):
         """Run the whole augmentation pipeline."""
 
+        encoding = kwargs.get("encoding", "utf-8")
+        prompt_type = kwargs.get("prompt_type", PromptType.BASIC.value)
+        paraphrase_examples = kwargs.get("paraphrase_examples", None)
+        custom_prompt = kwargs.get("custom_prompt", None)
+
+        data = self.load_dataset(
+            dataset_path=input_path,
+            batch_size=batch_size,
+            start_line_idx=start_line_idx,
+            encoding=encoding
+        )
+
+        augmentations: list[ParaphrasedJSON] | list[TranslatedJSON] = []
+
         augmentation_strategy = AugmentationStrategy(augmentation_strategy)
-        ...
+        if augmentation_strategy == AugmentationStrategy.PARAPHRASING:
+            if model:
+                self.initialize_paraphrasing_model(model)
+
+            num_prompt_template_tokens = self.count_prompt_template_tokens(
+                prompt_type=prompt_type,
+                paraphrase_examples=paraphrase_examples,
+                custom_prompt=custom_prompt
+            )
+
+            for batch_idx, batch in enumerate(data, start=1):
+                # 1. Convert raw texts to input prompts
+                prompts = [self.get_prompt_str(
+                    og_text=obj["text"],
+                    prompt_type=prompt_type,
+                    paraphrase_examples=paraphrase_examples,
+                    custom_prompt=custom_prompt
+                ) for obj in batch]
+
+                # 2. Tokenize input prompts
+                encoded = self.encode_paraphrases(prompts, **kwargs)
+
+                # 3. Generate paraphrases
+                max_new_tokens = self.estimate_max_new_tokens(
+                    num_text_tokens=encoded["input_ids"].shape[1],
+                    augmentation_strategy=augmentation_strategy.value,
+                    num_prompt_template_tokens=num_prompt_template_tokens
+                )
+
+                paraphrases = self.generate_paraphrases(
+                    inputs=encoded,
+                    num_paraphrases=num_augmentations,
+                    num_input_tokens=encoded["input_ids"].shape[1],
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    **kwargs
+                )
+
+                # 4. Save paraphrases
+                self.save_augmentations()
+
+        elif augmentation_strategy == AugmentationStrategy.TRANSLATION:
+            if model:
+                self.initialize_translation_model(model)

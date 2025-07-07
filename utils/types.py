@@ -24,19 +24,18 @@ class PromptType(ExplicitEnum):
     CUSTOM = "custom"
 PromptTypeLiteral = Literal["basic", "strict", "few_shot", "custom"]
 
-
-
-
-
-
-
+# JSON types
 class InputJSON(TypedDict):
     text: str
     text_hash: str
     text_source: str
 
-class Paraphrase(TypedDict):
-    paraphrase: str
+class ParaphrasedJSON(InputJSON):
+    paraphrases: list[str]
 
-class OutputJSON(InputJSON):
-    paraphrases: List[Paraphrase]
+class Translation(TypedDict):
+    forward_translation: str
+    backward_translation: str
+
+class TranslatedJSON(InputJSON):
+    translations: list[Translation]
