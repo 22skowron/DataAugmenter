@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 from abc import ABC, abstractmethod
-from typing import List, Iterator, Tuple, Literal, Optional, TypedDict
+from typing import Iterator, Literal, Optional, TypedDict
 
 from transformers import (
     AutoModelForCausalLM,
@@ -32,9 +32,24 @@ class DataAugmenter(ABC):
         pass
 
     @staticmethod
-    def save_augmentations():
-        """Save generated augmentations to a file."""
-        ...
+    def save_augmentations(
+            augmentations: list[dict],
+            file: str | Path,
+            mode: Literal["a", "w"] = "w",
+            encoding: str | None = "utf-8"
+    ):
+        """
+        Save generated augmentations to a file in JSON Lines (JSONL) format.
+
+        Args:
+            augmentations: A list of augmentation objects to save.
+            file: The file path where augmentations will be saved.
+            mode: File mode — 'a' to append or 'w' to overwrite. Defaults to 'w'.
+            encoding: Encoding used to write the file. Defaults to 'utf-8'.
+        """
+        with open(file, mode, encoding=encoding) as f:
+            for obj in augmentations:
+                f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 
 class LLMDataAugmenter(DataAugmenter):
@@ -58,11 +73,26 @@ class LLMDataAugmenter(DataAugmenter):
         """Generate augmented variations of the input text."""
         ...
 
+    @abstractmethod
+    def run(
+            self,
+            batch_size: int,
+            num_augmentations: int,
+            output_file: str | Path,
+            data: Optional[list[InputJSON]] = None,
+            input_file: Optional[str | Path] = None,
+            start_line_idx: int = 1,
+            len_factor: float = 1.4,
+            temperature: float = 0.7,
+            *args, **kwargs
+    ):
+        pass
 
-class SpecificAugmenter(LLMDataAugmenter):
+
+class ParaphrasingAugmenter(LLMDataAugmenter):
     def __init__(
             self,
-            pretrained_model_name_or_path: Path | str,
+            pretrained_model_name_or_path: str | Path,
             device: Optional[torch.device] = None,
             **kwargs
     ):
@@ -80,12 +110,20 @@ class SpecificAugmenter(LLMDataAugmenter):
             **kwargs
         )
 
-    def run(self):
+    def run(
+            self,
+            batch_size: int,
+            num_augmentations: int,
+            output_file: str | Path,
+            data: Optional[list[InputJSON]] = None,
+            input_file: Optional[str | Path] = None,
+            start_line_idx: int = 1,
+            len_factor: float = 1.4,
+            temperature: float = 0.7,
+            prompt_type: PromptTypeLiteral = "basic",
+            **kwargs
+    ):
         pass
 
     def generate(self, text: str):
         pass
-
-
-specific_augmenter = SpecificAugmenter()
-specific_augmenter.generate("abc")
