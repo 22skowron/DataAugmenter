@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from DataAugmenter import ParaphrasingAugmenter
-from utils.Timer import Timer
+from data_augmenter import ParaphrasingAugmenter
+from utils.timer import Timer
 from utils.logger import logger
 
 
